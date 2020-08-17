@@ -1,0 +1,603 @@
+const { MessageEmbed } = require("discord.js");
+
+module.exports = {
+  name: "help",
+  aliases: ["h"],
+  description: "Display all commands and descriptions",
+  execute(message) {
+    let commands = message.client.commands.array();
+
+    let helpEmbed = new MessageEmbed()
+      .setTitle("Evobot Help")
+      .setDescription("List of all commands")
+      .setColor("#F8AA2A");
+
+    commands.forEach((cmd) => {
+      helpEmbed.addField(
+        `**${message.client.prefix}${cmd.name} ${cmd.aliases ? `(${cmd.aliases})` : ""}**`,
+        `${cmd.description}`,
+        true
+      );
+    });
+
+    helpEmbed.setTimestamp();
+
+    return message.channel.send(helpEmbed).catch(console.error);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "loop",
+  aliases: ['l'],
+  description: "Toggle music loop",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    // toggle from false to true and reverse
+    queue.loop = !queue.loop;
+    return queue.textChannel
+      .send(`Loop is now ${queue.loop ? "**on**" : "**off**"}`)
+      .catch(console.error);
+  }
+};
+const { MessageEmbed } = require("discord.js");
+const lyricsFinder = require("lyrics-finder");
+
+module.exports = {
+  name: "lyrics",
+  aliases: ["ly"],
+  description: "Get lyrics for the currently playing song",
+  async execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.channel.send("There is nothing playing.").catch(console.error);
+
+    let lyrics = null;
+
+    try {
+      lyrics = await lyricsFinder(queue.songs[0].title, "");
+      if (!lyrics) lyrics = `No lyrics found for ${queue.songs[0].title}.`;
+    } catch (error) {
+      lyrics = `No lyrics found for ${queue.songs[0].title}.`;
+    }
+
+    let lyricsEmbed = new MessageEmbed()
+      .setTitle("Lyrics")
+      .setDescription(lyrics)
+      .setColor("#F8AA2A")
+      .setTimestamp();
+
+    if (lyricsEmbed.description.length >= 2048)
+      lyricsEmbed.description = `${lyricsEmbed.description.substr(0, 2045)}...`;
+    return message.channel.send(lyricsEmbed).catch(console.error);
+  }
+};
+const createBar = require("string-progressbar");
+const { MessageEmbed } = require("discord.js");
+
+module.exports = {
+  name: "np",
+  description: "Show now playing song",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+    const song = queue.songs[0];
+    const seek = (queue.connection.dispatcher.streamTime - queue.connection.dispatcher.pausedTime) / 1000;
+    const left = song.duration - seek;
+
+    let nowPlaying = new MessageEmbed()
+      .setTitle("Now playing")
+      .setDescription(`${song.title}\n${song.url}`)
+      .setColor("#F8AA2A")
+      .setAuthor("EvoBot")
+      .addField("\u200b", new Date(seek * 1000).toISOString().substr(11, 8) + "[" + createBar((song.duration == 0 ? seek : song.duration), seek, 20)[0] + "]" + (song.duration == 0 ? " ◉ LIVE" : new Date(song.duration * 1000).toISOString().substr(11, 8)), false);
+
+    if (song.duration > 0) nowPlaying.setFooter("Time Remaining: " + new Date(left * 1000).toISOString().substr(11, 8));
+
+    return message.channel.send(nowPlaying);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "pause",
+  description: "Pause the currently playing music",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    if (queue.playing) {
+      queue.playing = false;
+      queue.connection.dispatcher.pause(true);
+      return queue.textChannel.send(`${message.author} ⏸ paused the music.`).catch(console.error);
+    }
+  }
+};
+const { play } = require("../include/play");
+const { YOUTUBE_API_KEY, SOUNDCLOUD_CLIENT_ID } = require("../config.json");
+const ytdl = require("ytdl-core");
+const YouTubeAPI = require("simple-youtube-api");
+const youtube = new YouTubeAPI(YOUTUBE_API_KEY);
+const scdl = require("soundcloud-downloader");
+
+module.exports = {
+  name: "play",
+  cooldown: 3,
+  aliases: ["p"],
+  description: "Plays audio from YouTube or Soundcloud",
+  async execute(message, args) {
+    const { channel } = message.member.voice;
+
+    const serverQueue = message.client.queue.get(message.guild.id);
+    if (!channel) return message.reply("You need to join a voice channel first!").catch(console.error);
+    if (serverQueue && channel !== message.guild.me.voice.channel)
+      return message.reply(`You must be in the same channel as ${message.client.user}`).catch(console.error);
+
+    if (!args.length)
+      return message
+        .reply(`Usage: ${message.client.prefix}play <YouTube URL | Video Name | Soundcloud URL>`)
+        .catch(console.error);
+
+    const permissions = channel.permissionsFor(message.client.user);
+    if (!permissions.has("CONNECT"))
+      return message.reply("Cannot connect to voice channel, missing permissions");
+    if (!permissions.has("SPEAK"))
+      return message.reply("I cannot speak in this voice channel, make sure I have the proper permissions!");
+
+    const search = args.join(" ");
+    const videoPattern = /^(https?:\/\/)?(www\.)?(m\.)?(youtube\.com|youtu\.?be)\/.+$/gi;
+    const playlistPattern = /^.*(list=)([^#\&\?]*).*/gi;
+    const scRegex = /^https?:\/\/(soundcloud\.com)\/(.*)$/;
+    const url = args[0];
+    const urlValid = videoPattern.test(args[0]);
+
+    // Start the playlist if playlist url was provided
+    if (!videoPattern.test(args[0]) && playlistPattern.test(args[0])) {
+      return message.client.commands.get("playlist").execute(message, args);
+    }
+
+    const queueConstruct = {
+      textChannel: message.channel,
+      channel,
+      connection: null,
+      songs: [],
+      loop: false,
+      volume: 100,
+      playing: true
+    };
+
+    let songInfo = null;
+    let song = null;
+
+    if (urlValid) {
+      try {
+        songInfo = await ytdl.getInfo(url);
+        song = {
+          title: songInfo.videoDetails.title,
+          url: songInfo.videoDetails.video_url,
+          duration: songInfo.videoDetails.lengthSeconds
+        };
+      } catch (error) {
+        console.error(error);
+        return message.reply(error.message).catch(console.error);
+      }
+    } else if (scRegex.test(url)) {
+      try {
+        const trackInfo = await scdl.getInfo(url, SOUNDCLOUD_CLIENT_ID);
+        song = {
+          title: trackInfo.title,
+          url: trackInfo.permalink_url,
+          duration: trackInfo.duration / 1000
+        };
+      } catch (error) {
+        if (error.statusCode === 404)
+          return message.reply("Could not find that Soundcloud track.").catch(console.error);
+        return message.reply("There was an error playing that Soundcloud track.").catch(console.error);
+      }
+    } else {
+      try {
+        const results = await youtube.searchVideos(search, 1);
+        songInfo = await ytdl.getInfo(results[0].url);
+        song = {
+          title: songInfo.videoDetails.title,
+          url: songInfo.videoDetails.video_url,
+          duration: songInfo.videoDetails.lengthSeconds
+        };
+      } catch (error) {
+        console.error(error);
+        return message.reply("No video was found with a matching title").catch(console.error);
+      }
+    }
+
+    if (serverQueue) {
+      serverQueue.songs.push(song);
+      return serverQueue.textChannel
+        .send(`✅ **${song.title}** has been added to the queue by ${message.author}`)
+        .catch(console.error);
+    }
+
+    queueConstruct.songs.push(song);
+    message.client.queue.set(message.guild.id, queueConstruct);
+
+    try {
+      queueConstruct.connection = await channel.join();
+      await queueConstruct.connection.voice.setSelfDeaf(true);
+      play(queueConstruct.songs[0], message);
+    } catch (error) {
+      console.error(error);
+      message.client.queue.delete(message.guild.id);
+      await channel.leave();
+      return message.channel.send(`Could not join the channel: ${error}`).catch(console.error);
+    }
+  }
+};
+const { MessageEmbed } = require("discord.js");
+const { play } = require("../include/play");
+const { YOUTUBE_API_KEY, MAX_PLAYLIST_SIZE } = require("../config.json");
+const YouTubeAPI = require("simple-youtube-api");
+const youtube = new YouTubeAPI(YOUTUBE_API_KEY);
+
+module.exports = {
+  name: "playlist",
+  cooldown: 3,
+  aliases: ["pl"],
+  description: "Play a playlist from youtube",
+  async execute(message, args) {
+    const { PRUNING } = require("../config.json");
+    const { channel } = message.member.voice;
+
+    const serverQueue = message.client.queue.get(message.guild.id);
+    if (serverQueue && channel !== message.guild.me.voice.channel)
+      return message.reply(`You must be in the same channel as ${message.client.user}`).catch(console.error);
+
+    if (!args.length)
+      return message
+        .reply(`Usage: ${message.client.prefix}playlist <YouTube Playlist URL | Playlist Name>`)
+        .catch(console.error);
+    if (!channel) return message.reply("You need to join a voice channel first!").catch(console.error);
+
+    const permissions = channel.permissionsFor(message.client.user);
+    if (!permissions.has("CONNECT"))
+      return message.reply("Cannot connect to voice channel, missing permissions");
+    if (!permissions.has("SPEAK"))
+      return message.reply("I cannot speak in this voice channel, make sure I have the proper permissions!");
+
+    const search = args.join(" ");
+    const pattern = /^.*(youtu.be\/|list=)([^#\&\?]*).*/gi;
+    const url = args[0];
+    const urlValid = pattern.test(args[0]);
+
+    const queueConstruct = {
+      textChannel: message.channel,
+      channel,
+      connection: null,
+      songs: [],
+      loop: false,
+      volume: 100,
+      playing: true
+    };
+
+    let song = null;
+    let playlist = null;
+    let videos = [];
+
+    if (urlValid) {
+      try {
+        playlist = await youtube.getPlaylist(url, { part: "snippet" });
+        videos = await playlist.getVideos(MAX_PLAYLIST_SIZE || 10, { part: "snippet" });
+      } catch (error) {
+        console.error(error);
+        return message.reply("Playlist not found :(").catch(console.error);
+      }
+    } else {
+      try {
+        const results = await youtube.searchPlaylists(search, 1, { part: "snippet" });
+        playlist = results[0];
+        videos = await playlist.getVideos(MAX_PLAYLIST_SIZE || 10, { part: "snippet" });
+      } catch (error) {
+        console.error(error);
+        return message.reply("Playlist not found :(").catch(console.error);
+      }
+    }
+
+    videos.forEach((video) => {
+      song = {
+        title: video.title,
+        url: video.url,
+        duration: video.durationSeconds
+      };
+
+      if (serverQueue) {
+        serverQueue.songs.push(song);
+        if (!PRUNING)
+          message.channel
+            .send(`✅ **${song.title}** has been added to the queue by ${message.author}`)
+            .catch(console.error);
+      } else {
+        queueConstruct.songs.push(song);
+      }
+    });
+
+    let playlistEmbed = new MessageEmbed()
+      .setTitle(`${playlist.title}`)
+      .setURL(playlist.url)
+      .setColor("#F8AA2A")
+      .setTimestamp();
+
+    if (!PRUNING) {
+      playlistEmbed.setDescription(queueConstruct.songs.map((song, index) => `${index + 1}. ${song.title}`));
+      if (playlistEmbed.description.length >= 2048)
+        playlistEmbed.description =
+          playlistEmbed.description.substr(0, 2007) + "\nPlaylist larger than character limit...";
+    }
+
+    message.channel.send(`${message.author} Started a playlist`, playlistEmbed);
+
+    if (!serverQueue) message.client.queue.set(message.guild.id, queueConstruct);
+
+    if (!serverQueue) {
+      try {
+        queueConstruct.connection = await channel.join();
+        await queueConstruct.connection.voice.setSelfDeaf(true);
+        play(queueConstruct.songs[0], message);
+      } catch (error) {
+        console.error(error);
+        message.client.queue.delete(message.guild.id);
+        await channel.leave();
+        return message.channel.send(`Could not join the channel: ${error}`).catch(console.error);
+      }
+    }
+  }
+};
+const fs = require("fs");
+const config = require("../config.json");
+
+module.exports = {
+  name: "pruning",
+  description: "Toggle pruning of bot messages",
+  execute(message) {
+    config.PRUNING = !config.PRUNING;
+
+    fs.writeFile("./config.json", JSON.stringify(config, null, 2), (err) => {
+      if (err) {
+        console.log(err);
+        return message.channel.send("There was an error writing to the file.").catch(console.error);
+      }
+
+      return message.channel
+        .send(`Message pruning is ${config.PRUNING ? "**enabled**" : "**disabled**"}`)
+        .catch(console.error);
+    });
+  }
+};
+const { MessageEmbed, splitMessage, escapeMarkdown } = require("discord.js");
+
+module.exports = {
+  name: "queue",
+  aliases: ["q"],
+  description: "Show the music queue and now playing.",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+
+    const description = queue.songs.map((song, index) => `${index + 1}. ${escapeMarkdown(song.title)}`);
+
+    let queueEmbed = new MessageEmbed()
+      .setTitle("EvoBot Music Queue")
+      .setDescription(description)
+      .setColor("#F8AA2A");
+
+    const splitDescription = splitMessage(description, {
+      maxLength: 2048,
+      char: "\n",
+      prepend: "",
+      append: ""
+    });
+
+    splitDescription.forEach(async (m) => {
+      queueEmbed.setDescription(m);
+      message.channel.send(queueEmbed);
+    });
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "remove",
+  description: "Remove song from the queue",
+  execute(message, args) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.channel.send("There is no queue.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+    
+    if (!args.length) return message.reply(`Usage: ${message.client.prefix}remove <Queue Number>`);
+    if (isNaN(args[0])) return message.reply(`Usage: ${message.client.prefix}remove <Queue Number>`);
+
+    const song = queue.songs.splice(args[0] - 1, 1);
+    queue.textChannel.send(`${message.author} ❌ removed **${song[0].title}** from the queue.`);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "resume",
+  aliases: ["r"],
+  description: "Resume currently playing music",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    if (!queue.playing) {
+      queue.playing = true;
+      queue.connection.dispatcher.resume();
+      return queue.textChannel.send(`${message.author} ▶ resumed the music!`).catch(console.error);
+    }
+
+    return message.reply("The queue is not paused.").catch(console.error);
+  }
+};
+const { MessageEmbed } = require("discord.js");
+const { YOUTUBE_API_KEY } = require("../config.json");
+const YouTubeAPI = require("simple-youtube-api");
+const youtube = new YouTubeAPI(YOUTUBE_API_KEY);
+
+module.exports = {
+  name: "search",
+  description: "Search and select videos to play",
+  async execute(message, args) {
+    if (!args.length)
+      return message.reply(`Usage: ${message.client.prefix}${module.exports.name} <Video Name>`).catch(console.error);
+    if (message.channel.activeCollector)
+      return message.reply("A message collector is already active in this channel.");
+    if (!message.member.voice.channel)
+      return message.reply("You need to join a voice channel first!").catch(console.error);
+
+    const search = args.join(" ");
+
+    let resultsEmbed = new MessageEmbed()
+      .setTitle(`**Reply with the song number you want to play**`)
+      .setDescription(`Results for: ${search}`)
+      .setColor("#F8AA2A");
+
+    try {
+      const results = await youtube.searchVideos(search, 10);
+      results.map((video, index) => resultsEmbed.addField(video.shortURL, `${index + 1}. ${video.title}`));
+
+      var resultsMessage = await message.channel.send(resultsEmbed);
+
+      function filter(msg) {
+        const pattern = /(^[1-9][0-9]{0,1}$)/g;
+        return pattern.test(msg.content) && parseInt(msg.content.match(pattern)[0]) <= 10;
+      }
+
+      message.channel.activeCollector = true;
+      const response = await message.channel.awaitMessages(filter, { max: 1, time: 30000, errors: ["time"] });
+      const choice = resultsEmbed.fields[parseInt(response.first()) - 1].name;
+
+      message.channel.activeCollector = false;
+      message.client.commands.get("play").execute(message, [choice]);
+      resultsMessage.delete().catch(console.error);
+    } catch (error) {
+      console.error(error);
+      message.channel.activeCollector = false;
+    }
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "shuffle",
+  description: "Shuffle queue",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.channel.send("There is no queue.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    let songs = queue.songs;
+    for (let i = songs.length - 1; i > 1; i--) {
+      let j = 1 + Math.floor(Math.random() * i);
+      [songs[i], songs[j]] = [songs[j], songs[i]];
+    }
+    queue.songs = songs;
+    message.client.queue.set(message.guild.id, queue);
+    queue.textChannel.send(`${message.author} 🔀 shuffled the queue`).catch(console.error);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "skip",
+  aliases: ["s"],
+  description: "Skip the currently playing song",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue)
+      return message.reply("There is nothing playing that I could skip for you.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    queue.playing = true;
+    queue.connection.dispatcher.end();
+    queue.textChannel.send(`${message.author} ⏭ skipped the song`).catch(console.error);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "skipto",
+  aliases: ["st"],
+  description: "Skip to the selected queue number",
+  execute(message, args) {
+    if (!args.length)
+      return message
+        .reply(`Usage: ${message.client.prefix}${module.exports.name} <Queue Number>`)
+        .catch(console.error);
+
+    if (isNaN(args[0]))
+      return message
+        .reply(`Usage: ${message.client.prefix}${module.exports.name} <Queue Number>`)
+        .catch(console.error);
+
+    const queue = message.client.queue.get(message.guild.id);
+    if (!queue) return message.channel.send("There is no queue.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    if (args[0] > queue.songs.length)
+      return message.reply(`The queue is only ${queue.songs.length} songs long!`).catch(console.error);
+
+    queue.playing = true;
+    if (queue.loop) {
+      for (let i = 0; i < args[0] - 2; i++) {
+        queue.songs.push(queue.songs.shift());
+      }
+    } else {
+      queue.songs = queue.songs.slice(args[0] - 2);
+    }
+    queue.connection.dispatcher.end();
+    queue.textChannel.send(`${message.author} ⏭ skipped ${args[0] - 1} songs`).catch(console.error);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+
+module.exports = {
+  name: "stop",
+  description: "Stops the music",
+  execute(message) {
+    const queue = message.client.queue.get(message.guild.id);
+    
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+    if (!canModifyQueue(message.member)) return;
+
+    queue.songs = [];
+    queue.connection.dispatcher.end();
+    queue.textChannel.send(`${message.author} ⏹ stopped the music!`).catch(console.error);
+  }
+};
+const { canModifyQueue } = require("../util/EvobotUtil");
+
+module.exports = {
+  name: "volume",
+  aliases: ["v"],
+  description: "Change volume of currently playing music",
+  execute(message, args) {
+    const queue = message.client.queue.get(message.guild.id);
+
+    if (!queue) return message.reply("There is nothing playing.").catch(console.error);
+    if (!canModifyQueue(message.member))
+      return message.reply("You need to join a voice channel first!").catch(console.error);
+
+    if (!args[0]) return message.reply(`🔊 The current volume is: **${queue.volume}%**`).catch(console.error);
+    if (isNaN(args[0])) return message.reply("Please use a number to set volume.").catch(console.error);
+    if (parseInt(args[0]) > 100 || parseInt(args[0]) < 0)
+      return message.reply("Please use a number between 0 - 100.").catch(console.error);
+
+    queue.volume = args[0];
+    queue.connection.dispatcher.setVolumeLogarithmic(args[0] / 100);
+
+    return queue.textChannel.send(`Volume set to: **${args[0]}%**`).catch(console.error);
+  }
+};
